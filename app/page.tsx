@@ -39,7 +39,7 @@ async function gasPost<T>(action: string, payload: object): Promise<T> {
 }
 
 /* ───────── ข้อมูลสำรอง (เมื่อเชื่อม Apps Script ไม่ได้) ───────── */
-const DRIVER: Driver = { name: "คุณสมชาย", car: "รถตู้สีขาว · กข 1234", rating: 4.9 };
+const DRIVER: Driver = { name: "คุณสมชาย", car: "รถตู้สีขาว · กข 9999", rating: 4.9 };
 const FALLBACK = {
   vehicles: [
     { id: "van", name: "รถตู้ร่วม", desc: "8 ที่นั่ง · 15 นาที", price: 60, max: 8 },
