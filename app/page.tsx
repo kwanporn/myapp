@@ -1,669 +1,747 @@
 "use client";
 
-/**
- * Shuttle App – หน้าเดียวจบ (UI ครบ 7 หน้าจอ + รูปรถ SVG + เชื่อม Google Apps Script)
- * ไม่ต้องใช้ Tailwind / DaisyUI / ไฟล์รูปใน public
- */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Prompt, Sarabun } from "next/font/google";
 
-/* ───────── Types ───────── */
-type Vehicle = { id: string; name: string; desc: string; price: number; max: number };
-type Driver = { name: string; car: string; rating: number };
-type Recent = { name: string; sub: string };
-type Status = "ongoing" | "done" | "cancelled";
-type Booking = { id: string; fare: number; seats: number; vehicle: string; driver: Driver };
-type Trip = { id: string; from: string; to: string; v: string; n: number; fare: number; st: Status; d: string };
-type Screen = "home" | "select" | "track" | "done" | "trips" | "tix" | "prof";
-type SheetItem =
-  | { k: "row"; i: string; t: string; s?: string; c?: string; fn: () => void }
-  | { k: "btn"; b: string; cls?: string; fn: () => void }
-  | { k: "node"; node: ReactNode };
+const prompt = Prompt({ subsets: ["thai", "latin"], weight: ["400", "500", "600", "700"] });
+const sarabun = Sarabun({ subsets: ["thai", "latin"], weight: ["400", "500", "700"] });
 
-/* ───────── Google Apps Script API ───────── */
-const GAS_URL =
-  process.env.NEXT_PUBLIC_GAS_URL ??
-  "https://script.google.com/macros/s/AKfycbw6yXnk3owJGL3rXCA9dbosLeoVI71vcVAL4mNuqZRY1vvNSKBZQ-hD55bJU2_LAaeGXA/exec";
+/* ───────────── helpers ───────────── */
 
-async function gasGet<T>(action: string): Promise<T> {
-  const r = await fetch(`${GAS_URL}?action=${action}`);
-  if (!r.ok) throw new Error("HTTP " + r.status);
-  const j = await r.json();
-  if (j.error) throw new Error(j.error);
-  return j as T;
-}
-async function gasPost<T>(action: string, payload: object): Promise<T> {
-  // text/plain = simple request → ไม่ต้องทำ CORS preflight
-  const r = await fetch(GAS_URL, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ action, ...payload }),
-  });
-  if (!r.ok) throw new Error("HTTP " + r.status);
-  const j = await r.json();
-  if (j.error) throw new Error(j.error);
-  return j as T;
-}
+const pad = (n: number, l = 2) => String(n).padStart(l, "0");
+const MONTHS = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+const WEEKDAYS = ["อา","จ","อ","พ","พฤ","ศ","ส"];
 
-/* ───────── ข้อมูลตั้งต้น / สำรอง ───────── */
-const DRIVER: Driver = { name: "คุณสมชาย", car: "รถตู้สีขาว · กข 1234", rating: 4.9 };
-const FALLBACK = {
-  vehicles: [
-    { id: "van", name: "รถตู้ร่วม", desc: "8 ที่นั่ง · 15 นาที", price: 60, max: 8 },
-    { id: "bus", name: "มินิบัส", desc: "20 ที่นั่ง · 22 นาที", price: 40, max: 20 },
-    { id: "private", name: "รถส่วนตัว", desc: "4 ที่นั่ง · 8 นาที", price: 150, max: 4 },
-  ] as Vehicle[],
-  recent: [
-    { name: "บ้าน", sub: "ที่อยู่ที่บันทึกไว้" },
-    { name: "ที่ทำงาน", sub: "ที่อยู่ที่บันทึกไว้" },
-    { name: "สถานีขนส่ง", sub: "เดินทางล่าสุด" },
-  ] as Recent[],
-};
-const SEED: Trip[] = [
-  { id: "BK24110301", from: "บ้าน", to: "ที่ทำงาน", v: "รถตู้ร่วม", n: 1, fare: 60, st: "done", d: "3 พ.ย. 2026" },
-  { id: "BK24102812", from: "บ้าน", to: "สถานีขนส่ง", v: "มินิบัส", n: 2, fare: 80, st: "done", d: "28 ต.ค. 2026" },
-  { id: "BK24101507", from: "ที่ทำงาน", to: "บ้าน", v: "รถส่วนตัว", n: 1, fare: 150, st: "cancelled", d: "15 ต.ค. 2026" },
-];
-const PM = ["พร้อมเพย์", "เงินสด", "บัตรเครดิต •••• 4242"];
-const ETA = 4;
-const VC = ["#2563eb", "#f97316", "#16a34a"];
-const REC_C = ["#fde68a", "#bbf7d0", "#e9d5ff"];
-const REPLIES = ["รับทราบครับ", "ได้เลยครับ อีกไม่กี่นาทีถึงแล้วครับ", "ขอบคุณครับ"];
-const NAV: { l: string; s: Screen; c: string }[] = [
-  { l: "หน้าหลัก", s: "home", c: "#2563eb" },
-  { l: "การเดินทาง", s: "trips", c: "#fdba74" },
-  { l: "ตั๋วของฉัน", s: "tix", c: "#d8b4fe" },
-  { l: "โปรไฟล์", s: "prof", c: "#5eead4" },
-];
-
-/* ───────── Styles ───────── */
-const CSS = `
-.sh{min-height:100dvh;background:var(--page);color:var(--fg);font-size:15px;--bg:#fff;--fg:#0f172a;--mut:#475569;--line:#93c5fd;--soft:#eff6ff;--p:#2563eb;--pt:#fff;--ok:#16a34a;--or:#f97316;--er:#b91c1c;--page:linear-gradient(160deg,#dbeafe,#ede9fe 50%,#fce7f3);box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
-.sh *{box-sizing:border-box}
-.app{max-width:390px;margin:0 auto;min-height:100dvh;background:var(--bg);position:relative;overflow:hidden;display:flex;flex-direction:column}
-@media(min-width:600px){.app{height:882px;min-height:0;margin:24px auto;border-radius:28px;box-shadow:0 20px 60px #0004}}
-.s{display:flex;flex:1;flex-direction:column;min-height:0}
-.map{position:relative;flex:none;background:#dbeafe;overflow:hidden}.map svg{position:absolute;inset:0;width:100%;height:100%}
-.card{border:1.5px solid var(--line);border-radius:14px;padding:14px 16px;background:var(--bg)}
-.row{display:flex;align-items:center;gap:12px}.b{margin-left:auto;font-weight:700}.sub{color:var(--mut);font-size:13px}
-.dot{width:16px;height:16px;border-radius:50%;border:2px solid var(--ok);flex:none}.dot.d{background:var(--or);border-color:var(--or)}
-.sheet{margin-top:-24px;position:relative;background:var(--bg);border-radius:24px 24px 0 0;border-top:1.5px solid var(--line);padding:20px;display:flex;flex-direction:column;gap:12px;flex:1}
-.sh button{font:inherit;cursor:pointer}
-.cta{height:52px;border:0;border-radius:12px;background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;font-weight:700;font-size:16px;width:100%}
-.cta:disabled{opacity:.6}
-.gh{height:44px;border-radius:12px;background:var(--bg);border:1.5px solid var(--p);color:var(--p);font-weight:600;font-size:14px;flex:1}
-.circ{width:44px;height:44px;border-radius:50%;border:1.5px solid var(--p);background:var(--bg);color:var(--p);font-size:18px;flex:none}
-.h{padding:48px 20px 12px;display:flex;align-items:center;gap:12px;font-weight:700;font-size:18px;background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff}.h .circ{background:#ffffff33;border-color:#fff;color:#fff}
-.rec{display:flex;align-items:center;gap:12px;padding:8px;border:0;background:none;color:inherit;text-align:left;border-radius:12px;width:100%}.rec:hover{background:var(--soft)}
-.ic{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:700;color:#0f172a;flex:none}
-.veh{display:flex;align-items:center;gap:12px;border:2px solid var(--line);border-radius:14px;padding:10px 14px;cursor:pointer}.veh.on{border-color:var(--p);background:var(--soft)}
-.veh input{position:absolute;opacity:0;pointer-events:none}
-.nav{display:flex;border-top:1.5px solid var(--line);padding:8px 8px 20px;font-size:12px;color:var(--mut)}.nav div{flex:1;text-align:center}.nav i{display:block;width:24px;height:24px;border-radius:6px;margin:0 auto 4px}
-.steps{display:flex;gap:6px}.steps div{flex:1;font-size:11px;text-align:center;color:var(--mut)}.steps div:before{content:"";display:block;height:6px;border-radius:3px;background:#bfdbfe;margin-bottom:4px}.steps .on:before{background:var(--ok)}
-.st{font-size:28px;background:none;border:0;color:#cbd5e1;padding:2px}.st.on{color:#f59e0b}
-.sh textarea,.sh input.in{font:inherit;color:var(--fg);background:var(--bg)}
-
-.nav button{flex:1;border:0;background:none;color:var(--mut);font-size:12px;padding:0}.nav button.on{color:var(--p);font-weight:700}
-.ov{position:absolute;inset:0;background:#0006;display:none;align-items:flex-end;z-index:20}.ov.on{display:flex}
-.sheetm{background:var(--bg);width:100%;border-radius:24px 24px 0 0;padding:20px 20px 28px;display:flex;flex-direction:column;gap:10px;max-height:85%;overflow:auto}
-.ov.full{align-items:stretch;background:var(--bg)}
-.msgs{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
-.msg{max-width:80%;padding:8px 12px;border-radius:14px;background:var(--soft)}.msg.me{align-self:flex-end;background:var(--p);color:var(--pt)}
-.chip{border:1.5px solid var(--p);background:var(--bg);color:var(--p);border-radius:999px;padding:6px 12px;font-size:13px;white-space:nowrap}
-.call{background:#1e3a8a!important;color:#fff;flex-direction:column;align-items:center!important;justify-content:center;gap:12px;text-align:center}
-.call button{width:64px;height:64px;border-radius:50%;border:0;background:#ffffff33;color:#fff;font-size:13px}.call button[aria-pressed=true]{background:#fff;color:#1e3a8a}.call .end{background:#dc2626}
-.sw{width:46px;height:26px;border-radius:13px;border:0;background:#94a3b8;position:relative;flex:none}.sw:after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.15s}.sw.on{background:var(--p)}.sw.on:after{left:23px}
-.chp{font-size:12px;font-weight:700;padding:2px 10px;border-radius:999px;background:#dbeafe;color:#1e3a8a}.chp.d{background:#bbf7d0;color:#14532d}.chp.c{background:#fecaca;color:#7f1d1d}
-.hc{flex:1;border:1.5px solid #ffffff00;border-radius:14px;padding:8px 2px;display:flex;flex-direction:column;align-items:center;gap:2px;color:inherit;font-size:13px}
-.sheet:before{content:"";width:44px;height:5px;border-radius:3px;background:linear-gradient(90deg,#f97316,#ec4899,#7c3aed);align-self:center;flex:none}
-.s .card{background:linear-gradient(135deg,#2563eb14,#ec489914),var(--bg)}
-.danger{color:var(--er)!important;border-color:var(--er)!important}
-.lst{padding:0 20px;flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
-
-.sh.dk{--bg:#0f172a;--fg:#f1f5f9;--mut:#cbd5e1;--line:#1d4ed8;--soft:#1e293b;--p:#60a5fa;--pt:#0f172a;--ok:#4ade80;--or:#fb923c;--er:#fca5a5;--page:#020617}
-.toast{position:absolute;top:16px;left:50%;transform:translateX(-50%);background:#1e3a8a;color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;z-index:30;white-space:nowrap}
-.off{background:#f97316;color:#0f172a;font-size:12px;font-weight:600;text-align:center;padding:4px 12px}
-`;
-
-/* ───────── รูปภาพ (inline SVG) ───────── */
-function VehSvg({ i, w }: { i: number; w: number }) {
-  const bodies = [
-    <g key="0">
-      <path d="M8 56V28q0-10 10-10h50q8 0 14 8l20 14q6 4 6 12v4q0 4-4 4H12q-4 0-4-4z" fill="#2563eb" />
-      <path d="M16 26h14v16H16zM34 26h16v16H34zM54 26h16v16H54z" fill="#dbeafe" />
-      <path d="M76 26l16 12H76z" fill="#dbeafe" />
-      <rect x="8" y="46" width="104" height="4" fill="#1d4ed8" />
-      <rect x="104" y="48" width="8" height="5" rx="2" fill="#fde68a" />
-      <circle cx="30" cy="60" r="10" fill="#0f172a" /><circle cx="30" cy="60" r="4" fill="#94a3b8" />
-      <circle cx="88" cy="60" r="10" fill="#0f172a" /><circle cx="88" cy="60" r="4" fill="#94a3b8" />
-    </g>,
-    <g key="1">
-      <rect x="6" y="14" width="108" height="46" rx="10" fill="#f97316" />
-      <g fill="#ffedd5"><rect x="12" y="22" width="16" height="16" rx="2" /><rect x="32" y="22" width="16" height="16" rx="2" /><rect x="52" y="22" width="16" height="16" rx="2" /><rect x="72" y="22" width="16" height="16" rx="2" /><path d="M92 22h14q4 0 4 4v12H92z" /></g>
-      <rect x="6" y="44" width="108" height="5" fill="#c2410c" />
-      <rect x="104" y="50" width="8" height="5" rx="2" fill="#fde68a" />
-      <circle cx="30" cy="60" r="10" fill="#0f172a" /><circle cx="30" cy="60" r="4" fill="#94a3b8" />
-      <circle cx="90" cy="60" r="10" fill="#0f172a" /><circle cx="90" cy="60" r="4" fill="#94a3b8" />
-    </g>,
-    <g key="2">
-      <path d="M10 56v-12q0-6 6-8l14-4 14-14q3-3 8-3h22q6 0 10 4l12 13 12 3q8 2 8 10v11q0 4-4 4H14q-4 0-4-4z" fill="#16a34a" />
-      <path d="M46 20h20q3 0 5 2l9 12H42z" fill="#dcfce7" />
-      <rect x="10" y="48" width="100" height="4" fill="#15803d" />
-      <rect x="104" y="44" width="8" height="5" rx="2" fill="#fde68a" />
-      <circle cx="32" cy="58" r="10" fill="#0f172a" /><circle cx="32" cy="58" r="4" fill="#94a3b8" />
-      <circle cx="88" cy="58" r="10" fill="#0f172a" /><circle cx="88" cy="58" r="4" fill="#94a3b8" />
-    </g>,
-  ];
-  return (
-    <svg viewBox="0 0 120 80" width={w} height={Math.round((w * 2) / 3)} style={{ flex: "none" }} role="img" aria-label={FALLBACK.vehicles[i % 3].name}>
-      <ellipse cx="60" cy="72" rx="48" ry="4" fill="#0f172a" opacity=".15" />
-      {bodies[i % 3]}
-    </svg>
-  );
-}
-const vIdx = (name: string) => Math.max(0, FALLBACK.vehicles.findIndex((x) => x.name === name));
-
-function MapSvg({ van = false }: { van?: boolean }) {
-  return (
-    <svg viewBox="0 0 390 470" preserveAspectRatio="xMidYMid slice" aria-hidden>
-      <path d="M0 380C100 340 200 420 390 360V470H0Z" fill="#93c5fd" />
-      <rect x="100" y="130" width="60" height="50" rx="6" fill="#bbf7d0" />
-      <rect x="260" y="270" width="60" height="60" rx="6" fill="#fde68a" />
-      <rect x="10" y="20" width="70" height="90" rx="6" fill="#bfdbfe" />
-      <rect x="180" y="20" width="60" height="90" rx="6" fill="#c7d2fe" />
-      <rect x="10" y="200" width="70" height="50" rx="6" fill="#fbcfe8" />
-      <g stroke="#fff" strokeWidth="14" fill="none"><path d="M-10 120H400" /><path d="M-10 260H400" /><path d="M90-10V400" /><path d="M250-10V400" /></g>
-      <g stroke="#fff" strokeWidth="6"><path d="M-10 190H400" /><path d="M170-10V400" /><path d="M330-10V400" /></g>
-      <path d="M100 300C150 260 200 250 270 190" stroke="#f97316" strokeWidth="4" strokeDasharray="8 6" fill="none" />
-      <circle cx="100" cy="300" r="10" fill="#16a34a" stroke="#fff" strokeWidth="3" />
-      <rect x="261" y="181" width="18" height="18" rx="4" fill="#f97316" stroke="#fff" strokeWidth="3" />
-      {van && (
-        <g>
-          <rect x="-14" y="-9" width="28" height="18" rx="5" fill="#2563eb" stroke="#fff" strokeWidth="2" />
-          <rect x="-9" y="-5" width="18" height="6" rx="1.5" fill="#dbeafe" />
-          <animateMotion dur="14s" repeatCount="indefinite" path="M270 190C200 250 150 260 100 300" />
-        </g>
-      )}
-    </svg>
-  );
-}
-function DriverSvg({ size = 52 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 96 96" style={{ borderRadius: "50%", flex: "none" }} role="img" aria-label="รูปคนขับ">
-      <rect width="96" height="96" fill="#bfdbfe" />
-      <path d="M10 96c3-22 20-30 38-30s35 8 38 30z" fill="#1d4ed8" />
-      <rect x="42" y="52" width="12" height="16" rx="4" fill="#d9a066" />
-      <ellipse cx="48" cy="40" rx="17" ry="19" fill="#e8b27d" />
-      <path d="M30 36c0-14 10-20 18-20s18 6 18 20c-4-8-10-11-18-11s-14 3-18 11z" fill="#1e293b" />
-      <circle cx="42" cy="42" r="2" fill="#1e293b" /><circle cx="54" cy="42" r="2" fill="#1e293b" />
-    </svg>
-  );
-}
-function Qr({ id }: { id: string }) {
-  const cells: ReactNode[] = [];
-  let k = 0;
-  for (let i = 0; i < 9; i++)
-    for (let j = 0; j < 9; j++) {
-      k = (k * 31 + id.charCodeAt((i * 9 + j) % id.length) + i * j) % 97;
-      if (k % 2) cells.push(<rect key={i * 9 + j} x={j * 8} y={i * 8} width="8" height="8" />);
-    }
-  return <svg viewBox="0 0 72 72" width="120" height="120" fill="currentColor" role="img" aria-label="QR ตั๋ว">{cells}</svg>;
-}
-const Chip = ({ st }: { st: Status }) => (
-  <span className={`chp ${st === "done" ? "d" : st === "cancelled" ? "c" : ""}`}>{st === "done" ? "สำเร็จ" : st === "cancelled" ? "ยกเลิก" : "กำลังเดินทาง"}</span>
-);
-const Switch = ({ on, label, onClick }: { on: boolean; label: string; onClick: () => void }) => (
-  <button className={`sw${on ? " on" : ""}`} role="switch" aria-checked={on} aria-label={label} onClick={onClick} />
-);
-
-/* ───────── Page ───────── */
-export default function Page() {
-  const [screen, setScreen] = useState<Screen>("home");
-  const screenRef = useRef<Screen>("home");
-  const [vehicles, setVehicles] = useState<Vehicle[]>(FALLBACK.vehicles);
-  const [recent, setRecent] = useState<Recent[]>(FALLBACK.recent);
-  const [offline, setOffline] = useState(false);
-  const [from, setFrom] = useState("ตำแหน่งปัจจุบัน");
-  const [to, setTo] = useState("");
-  const [sel, setSel] = useState(0);
-  const [seats, setSeats] = useState(1);
-  const [pm, setPm] = useState(0);
-  const [booking, setBooking] = useState<Booking | null>(null);
-  const [status, setStatus] = useState<Status | null>(null);
-  const [hist, setHist] = useState<Trip[]>(SEED);
-  const [busy, setBusy] = useState(false);
-  const [t, setT] = useState(0);
-  const [rate, setRate] = useState(5);
-  const [comment, setComment] = useState("");
-  const [toast, setToast] = useState("");
-  const [sheet, setSheet] = useState<{ title: string; items: SheetItem[] } | null>(null);
-  const [chat, setChat] = useState(false);
-  const [msgs, setMsgs] = useState<{ m: string; me?: boolean }[]>([{ m: "สวัสดีครับ กำลังไปรับนะครับ" }]);
-  const [cin, setCin] = useState("");
-  const [call, setCall] = useState<{ sec: number; mute: boolean; spk: boolean } | null>(null);
-  const [dark, setDark] = useState(false);
-  const [noti, setNoti] = useState(true);
-  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const replyIdx = useRef(0);
-  const msgBox = useRef<HTMLDivElement | null>(null);
-
-  const v = vehicles[sel] ?? vehicles[0];
-  const ongoing = status === "ongoing" && booking;
-
-  const go = (s: Screen) => { screenRef.current = s; setScreen(s); setSheet(null); };
-  const say = (m: string) => {
-    setToast(m);
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(""), 2200);
-  };
-  const close = () => setSheet(null);
-  const patchTrip = (id: string, st: Status) => setHist((h) => h.map((x) => (x.id === id ? { ...x, st } : x)));
-
+function useStored<T>(key: string, init: T) {
+  const [v, setV] = useState<T>(init);
+  const [ready, setReady] = useState(false);
   useEffect(() => {
-    gasGet<typeof FALLBACK>("init").then((d) => { setVehicles(d.vehicles); setRecent(d.recent); }).catch(() => setOffline(true));
-    if (window.matchMedia?.("(prefers-color-scheme: dark)").matches) setDark(true);
-  }, []);
-
-  /* จำลองการเดินทาง: นับถอยหลัง ETA → กำลังเดินทาง → ถึงที่หมาย (ทำงานต่อแม้ออกจากหน้าติดตาม) */
-  const bid = ongoing ? booking.id : null;
-  useEffect(() => {
-    if (!bid) return;
-    setT(0);
-    const id = setInterval(() => setT((x) => x + 1), 2000);
-    return () => clearInterval(id);
-  }, [bid]);
-
-  useEffect(() => {
-    if (!booking || status !== "ongoing" || t < ETA + 3) return;
-    const id = setTimeout(() => {
-      setStatus("done");
-      patchTrip(booking.id, "done");
-      gasPost("updateBooking", { id: booking.id, status: "completed" }).catch(() => {});
-      if (screenRef.current === "track") go("done");
-      else say("ถึงที่หมายแล้ว · ดูใบเสร็จที่หน้าการเดินทาง");
-    }, 1200);
-    return () => clearTimeout(id);
-  }, [t, status, booking]);
-
-  useEffect(() => { msgBox.current?.scrollTo({ top: 1e5 }); }, [msgs, chat]);
-
-  useEffect(() => {
-    if (!call) return;
-    const id = setInterval(() => setCall((c) => (c ? { ...c, sec: c.sec + 1 } : c)), 1000);
-    return () => clearInterval(id);
-  }, [!!call]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /* ───── actions ───── */
-  const startBooking = () => {
-    if (ongoing) { say("คุณมีการเดินทางที่กำลังดำเนินอยู่"); return go("track"); }
-    if (!to.trim()) return say("กรุณาระบุจุดหมาย");
-    go("select");
-  };
-
-  const confirm = async () => {
-    setBusy(true);
-    let b: Booking;
     try {
-      b = await gasPost<Booking>("createBooking", { from, to, vehicle: v.id, seats });
-    } catch {
-      b = { id: "BK" + Date.now().toString().slice(-8), fare: v.price * seats, seats, vehicle: v.name, driver: DRIVER };
-      setOffline(true);
+      const s = localStorage.getItem(key);
+      if (s) setV(JSON.parse(s) as T);
+    } catch {}
+    setReady(true);
+  }, [key]);
+  useEffect(() => {
+    if (!ready) return;
+    try { localStorage.setItem(key, JSON.stringify(v)); } catch {}
+  }, [key, v, ready]);
+  return [v, setV] as const;
+}
+
+function useNow() {
+  const [now, setNow] = useState<Date | null>(null);
+  useEffect(() => {
+    setNow(new Date());
+    const t = setInterval(() => setNow(new Date()), 250);
+    return () => clearInterval(t);
+  }, []);
+  return now;
+}
+
+type W = Window & { webkitAudioContext?: typeof AudioContext };
+
+function useBeeper() {
+  const ctx = useRef<AudioContext | null>(null);
+  const unlock = useCallback(() => {
+    if (!ctx.current) {
+      const C = window.AudioContext || (window as W).webkitAudioContext;
+      if (C) ctx.current = new C();
     }
-    const d = new Date().toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "numeric" });
-    setHist((h) => [{ id: b.id, from, to, v: b.vehicle, n: b.seats, fare: b.fare, st: "ongoing", d }, ...h]);
-    setBooking(b); setStatus("ongoing"); setT(0); setBusy(false); go("track");
-  };
+    ctx.current?.resume();
+  }, []);
+  const beep = useCallback((freq = 880, dur = 0.18) => {
+    const c = ctx.current;
+    if (!c) return;
+    const o = c.createOscillator();
+    const g = c.createGain();
+    o.frequency.value = freq;
+    o.connect(g);
+    g.connect(c.destination);
+    g.gain.setValueAtTime(0.0001, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.3, c.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dur);
+    o.start();
+    o.stop(c.currentTime + dur + 0.02);
+  }, []);
+  return { unlock, beep };
+}
 
-  const cancel = () =>
-    setSheet({
-      title: "ยกเลิกการจอง?",
-      items: [
-        { k: "node", node: <div className="sub">การจองนี้จะไม่ถูกเรียกเก็บเงิน</div> },
-        { k: "btn", b: "ยืนยันยกเลิก", cls: "gh danger", fn: () => {
-            if (booking) { patchTrip(booking.id, "cancelled"); gasPost("updateBooking", { id: booking.id, status: "cancelled" }).catch(() => {}); }
-            setStatus("cancelled"); say("ยกเลิกการจองแล้ว"); go("home"); } },
-        { k: "btn", b: "ไม่ยกเลิก", cls: "cta", fn: close },
-      ],
-    });
+function tzParts(d: Date, tz: string) {
+  const f = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  const p = Object.fromEntries(f.formatToParts(d).map((x) => [x.type, x.value]));
+  return { h: Number(p.hour) % 24, m: Number(p.minute), s: Number(p.second) };
+}
 
-  const finish = async () => {
-    if (booking) await gasPost("updateBooking", { id: booking.id, status: "rated", rating: rate, comment }).catch(() => {});
-    say("ขอบคุณสำหรับคะแนน!");
-    setComment(""); setTo(""); setSeats(1); setRate(5); go("home");
-  };
+/* ───────────── 1. เวลา ───────────── */
 
-  const receipt = (h: Trip) =>
-    setSheet({
-      title: "ใบเสร็จ " + h.id,
-      items: [
-        { k: "node", node: <div style={{ textAlign: "center" }}><VehSvg i={vIdx(h.v)} w={120} /></div> },
-        { k: "node", node: (
-          <div className="card" style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14 }}>
-            <div className="row">สถานะ<span className="b"><Chip st={h.st} /></span></div>
-            <div className="row">จุดหมาย<b className="b">{h.to}</b></div>
-            <div className="row">รถ · ที่นั่ง<b className="b">{h.v} · {h.n}</b></div>
-            <div className="row">ค่าโดยสาร<b className="b">฿{h.fare}</b></div>
-            <div className="row">ชำระด้วย<b className="b">{PM[pm]}</b></div>
-            <div className="row">วันที่<b className="b">{h.d}</b></div>
-          </div>) },
-        { k: "btn", b: "ส่งใบเสร็จทางอีเมล", fn: () => { close(); say("ส่งใบเสร็จแล้ว"); } },
-        { k: "btn", b: "ปิด", cls: "cta", fn: close },
-      ],
-    });
+const ZONES = [
+  { tz: "Asia/Bangkok", name: "กรุงเทพฯ" },
+  { tz: "Asia/Tokyo", name: "โตเกียว" },
+  { tz: "Europe/London", name: "ลอนดอน" },
+  { tz: "America/New_York", name: "นิวยอร์ก" },
+  { tz: "Australia/Sydney", name: "ซิดนีย์" },
+];
 
-  const paySheet = () =>
-    setSheet({
-      title: "ช่องทางชำระเงิน",
-      items: PM.map((n, i) => ({ k: "row" as const, i: ["฿", "฿", "▭"][i], t: n, s: i === pm ? "ใช้งานอยู่" : "", c: ["#bbf7d0", "#fde68a", "#e9d5ff"][i], fn: () => { setPm(i); close(); } })),
-    });
-
-  const pickSheet = () =>
-    setSheet({
-      title: "เลือกจุดรับ",
-      items: ["ตำแหน่งปัจจุบัน", "บ้าน", "ที่ทำงาน"].map((n, i) => ({ k: "row" as const, i: n[0], t: n, c: REC_C[i], fn: () => { setFrom(n); close(); } })),
-    });
-
-  const helpSheet = () =>
-    setSheet({
-      title: "ศูนย์ช่วยเหลือ",
-      items: [
-        { k: "row", i: "☎", t: "โทรฝ่ายบริการลูกค้า", s: "1234 · ทุกวัน 06:00–22:00", fn: () => { close(); say("กำลังโทร 1234 (จำลอง)"); } },
-        { k: "row", i: "✉", t: "ส่งอีเมลถึงเรา", s: "help@shuttle.example", c: "#fde68a", fn: () => { close(); say("เปิดอีเมล (จำลอง)"); } },
-        { k: "btn", b: "ปิด", fn: close },
-      ],
-    });
-
-  const logout = () =>
-    setSheet({
-      title: "ออกจากระบบ?",
-      items: [
-        { k: "btn", b: "ออกจากระบบ", cls: "gh danger", fn: () => { setBooking(null); setStatus(null); say("ออกจากระบบแล้ว"); go("home"); } },
-        { k: "btn", b: "ยกเลิก", cls: "cta", fn: close },
-      ],
-    });
-
-  const send = (txt?: string) => {
-    const m = (txt ?? cin).trim();
-    if (!m) return;
-    setMsgs((x) => [...x, { m, me: true }]);
-    setCin("");
-    setTimeout(() => setMsgs((x) => [...x, { m: REPLIES[replyIdx.current++ % 3] }]), 900);
-  };
-
-  const share = () => {
-    const u = `${location.href.split("#")[0]}#${booking?.id ?? "trip"}`;
-    navigator.clipboard?.writeText(u).then(() => say("คัดลอกลิงก์เส้นทางแล้ว"), () => say("ลิงก์: " + u)) ?? say("ลิงก์: " + u);
-  };
-
-  const pickVehicle = (i: number) => { setSel(i); setSeats((s) => Math.min(s, vehicles[i].max)); startBooking(); };
-
-  const phase = t < ETA ? `รถถึงใน ${ETA - t} นาที` : t < ETA + 3 ? "กำลังเดินทางไปยังจุดหมาย" : "ถึงที่หมายแล้ว";
-  const mm = (n: number) => String(Math.floor(n / 60)).padStart(2, "0") + ":" + String(n % 60).padStart(2, "0");
-
-  const NavBar = ({ cur }: { cur: Screen }) => (
-    <nav className="nav" aria-label="เมนูหลัก">
-      {NAV.map((x) => (
-        <button key={x.s} className={x.s === cur ? "on" : ""} onClick={() => go(x.s)}><i style={{ background: x.c }} />{x.l}</button>
-      ))}
-    </nav>
+function TimeTab({ now }: { now: Date | null }) {
+  if (!now) return <div className="panel">กำลังโหลด…</div>;
+  const main = tzParts(now, "Asia/Bangkok");
+  const dateStr = new Intl.DateTimeFormat("th-TH", { timeZone: "Asia/Bangkok", weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(now);
+  const R = 118;
+  const C = 2 * Math.PI * R;
+  const secFrac = (main.s + (now.getMilliseconds() / 1000)) / 60;
+  return (
+    <>
+      <section className="hero">
+        <svg viewBox="0 0 280 280" className="ring" aria-hidden>
+          <circle cx="140" cy="140" r={R} className="ring-bg" />
+          <circle cx="140" cy="140" r={R} className="ring-fg" strokeDasharray={C} strokeDashoffset={C * (1 - secFrac)} transform="rotate(-90 140 140)" />
+        </svg>
+        <div className="hero-text">
+          <div className={`big ${prompt.className}`}>{pad(main.h)}:{pad(main.m)}</div>
+          <div className="sec">{pad(main.s)} วินาที</div>
+        </div>
+      </section>
+      <p className="date">{dateStr}</p>
+      <h2>เวลาทั่วโลก</h2>
+      <div className="zones">
+        {ZONES.map((z) => {
+          const p = tzParts(now, z.tz);
+          const day = new Intl.DateTimeFormat("th-TH", { timeZone: z.tz, weekday: "short", day: "numeric", month: "short" }).format(now);
+          return (
+            <div className="zone" key={z.tz}>
+              <div><b>{z.name}</b><span className="muted">{day}</span></div>
+              <div className={`zt ${prompt.className}`}>{pad(p.h)}:{pad(p.m)}</div>
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
+}
+
+/* ───────────── 2. ผลบอล ───────────── */
+
+const LEAGUES = [
+  { id: "eng.1", name: "พรีเมียร์ลีก" },
+  { id: "esp.1", name: "ลาลีกา" },
+  { id: "ger.1", name: "บุนเดสลีกา" },
+  { id: "ita.1", name: "เซเรีย อา" },
+  { id: "uefa.champions", name: "แชมเปียนส์ลีก" },
+  { id: "tha.1", name: "ไทยลีก" },
+];
+
+interface EspnComp { homeAway: string; score?: string; team: { displayName: string; logo?: string } }
+interface EspnEvent {
+  id: string;
+  date: string;
+  status: { displayClock?: string; type: { state: string; shortDetail: string } };
+  competitions: { competitors: EspnComp[] }[];
+}
+interface Match { id: string; home: string; away: string; hs: string; as: string; state: string; detail: string; time: string; hl?: string; al?: string }
+
+const SAMPLE: Match[] = [
+  { id: "s1", home: "Liverpool", away: "Arsenal", hs: "2", as: "1", state: "post", detail: "FT", time: "" },
+  { id: "s2", home: "Man City", away: "Chelsea", hs: "1", as: "1", state: "in", detail: "67'", time: "" },
+  { id: "s3", home: "Tottenham", away: "Newcastle", hs: "", as: "", state: "pre", detail: "", time: "22:30" },
+];
+
+function FootballTab() {
+  const [league, setLeague] = useState(LEAGUES[0].id);
+  const [matches, setMatches] = useState<Match[] | null>(null);
+  const [demo, setDemo] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/soccer/${league}/scoreboard`);
+      if (!r.ok) throw new Error("bad");
+      const j = (await r.json()) as { events?: EspnEvent[] };
+      const list: Match[] = (j.events ?? []).map((e) => {
+        const cs = e.competitions[0].competitors;
+        const h = cs.find((c) => c.homeAway === "home") ?? cs[0];
+        const a = cs.find((c) => c.homeAway === "away") ?? cs[1];
+        const t = new Intl.DateTimeFormat("th-TH", { timeZone: "Asia/Bangkok", hour: "2-digit", minute: "2-digit", hour12: false, day: "numeric", month: "short" }).format(new Date(e.date));
+        return {
+          id: e.id, home: h.team.displayName, away: a.team.displayName,
+          hs: h.score ?? "", as: a.score ?? "", state: e.status.type.state,
+          detail: e.status.type.state === "in" ? e.status.displayClock ?? "" : e.status.type.shortDetail,
+          time: t, hl: h.team.logo, al: a.team.logo,
+        };
+      });
+      setMatches(list);
+      setDemo(false);
+    } catch {
+      setMatches(SAMPLE);
+      setDemo(true);
+    }
+  }, [league]);
+
+  useEffect(() => {
+    setMatches(null);
+    load();
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, [load]);
 
   return (
-    <div className={`sh${dark ? " dk" : ""}`}>
-      <style>{CSS}</style>
-      <main className="app">
-        {offline && <div className="off" role="status">เชื่อมต่อ Apps Script ไม่ได้ · ใช้ข้อมูลตัวอย่าง</div>}
+    <>
+      <div className="chips">
+        {LEAGUES.map((l) => (
+          <button key={l.id} className={`chip ${league === l.id ? "on" : ""}`} onClick={() => setLeague(l.id)}>{l.name}</button>
+        ))}
+      </div>
+      {demo && <p className="note">โหลดข้อมูลจริงไม่ได้ จึงแสดงข้อมูลตัวอย่าง</p>}
+      {matches === null && <div className="panel">กำลังโหลดผลบอล…</div>}
+      {matches?.length === 0 && <div className="panel">ลีกนี้ไม่มีนัดในช่วงนี้</div>}
+      <div className="list">
+        {matches?.map((m) => (
+          <div className="match" key={m.id}>
+            <div className="team">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              {m.hl ? <img src={m.hl} alt="" width={28} height={28} /> : <span className="logo-ph" />}
+              <span>{m.home}</span>
+            </div>
+            <div className="score">
+              {m.state === "pre" ? <span className="muted">{m.time}</span> : <span className={prompt.className}>{m.hs} - {m.as}</span>}
+              <small className={m.state === "in" ? "live" : "muted"}>{m.state === "in" ? `● ${m.detail}` : m.state === "post" ? "จบการแข่งขัน" : ""}</small>
+            </div>
+            <div className="team right">
+              <span>{m.away}</span>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              {m.al ? <img src={m.al} alt="" width={28} height={28} /> : <span className="logo-ph" />}
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
 
-        {/* 1 หน้าหลัก */}
-        {screen === "home" && (
-          <section className="s">
-            <div className="map" style={{ height: 380 }}><MapSvg /></div>
-            <div className="card" style={{ position: "absolute", left: 20, right: 20, top: 48, boxShadow: "0 6px 20px #0003", display: "flex", flexDirection: "column", gap: 10 }}>
-              <button className="row" onClick={pickSheet} style={{ border: 0, background: "none", color: "inherit", padding: 0, textAlign: "left" }}>
-                <span className="dot" /><span>{from}</span><span className="b sub">เปลี่ยน ›</span>
-              </button>
-              <div style={{ borderTop: "1px solid #bfdbfe" }} />
-              <label className="row"><span className="dot d" />
-                <input className="in" value={to} onChange={(e) => setTo(e.target.value)} placeholder="คุณจะไปที่ไหน?" aria-label="จุดหมาย" style={{ border: 0, outline: 0, width: "100%", fontWeight: 700 }} />
-              </label>
-            </div>
-            <div className="sheet">
-              <b style={{ fontSize: 17 }}>เลือกรถที่ใช้บ่อย</b>
-              <div className="row" style={{ gap: 8, alignItems: "stretch" }}>
-                {vehicles.map((x, i) => (
-                  <button key={x.id} className="hc" onClick={() => pickVehicle(i)} style={{ background: `linear-gradient(160deg,${VC[i % 3]}44,${VC[i % 3]}11)`, borderColor: VC[i % 3] }}>
-                    <VehSvg i={i} w={84} /><b>{x.name}</b><span className="sub">฿{x.price}</span>
-                  </button>
-                ))}
-              </div>
-              <b style={{ fontSize: 17 }}>จุดหมายล่าสุด</b>
-              <div>
-                {recent.map((r, i) => (
-                  <button key={r.name} className="rec" onClick={() => setTo(r.name)}>
-                    <span className="ic" style={{ background: REC_C[i % 3] }}>{r.name[0]}</span>
-                    <span>{r.name}<br /><span className="sub">{r.sub}</span></span>
-                  </button>
-                ))}
-              </div>
-              <button className="cta" style={{ marginTop: "auto" }} onClick={startBooking}>จองรถรับส่ง</button>
-            </div>
-            <NavBar cur="home" />
-          </section>
-        )}
+/* ───────────── 3. จับเวลา ───────────── */
 
-        {/* 2 เลือกรถ */}
-        {screen === "select" && (
-          <section className="s">
-            <div className="h"><button className="circ" onClick={() => go("home")} aria-label="ย้อนกลับ">←</button>เลือกรถรับส่ง</div>
-            <div style={{ padding: "12px 20px 0", display: "flex", flexDirection: "column", gap: 12, flex: 1, overflowY: "auto" }}>
-              <div className="card" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div className="row"><span className="dot" />{from}</div>
-                <div className="row"><span className="dot d" /><b>{to}</b></div>
-              </div>
-              <div className="map" style={{ height: 130, borderRadius: 14 }}><MapSvg /></div>
-              <b style={{ fontSize: 17 }}>ประเภทรถ</b>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {vehicles.map((x, i) => (
-                  <label key={x.id} className={`veh${i === sel ? " on" : ""}`} style={{ background: `linear-gradient(90deg,${VC[i % 3]}33,transparent)`, borderColor: i === sel ? VC[i % 3] : "var(--line)" }}>
-                    <input type="radio" name="v" checked={i === sel} onChange={() => { setSel(i); setSeats((s) => Math.min(s, x.max)); }} />
-                    <VehSvg i={i} w={84} />
-                    <div><b>{x.name}</b><div className="sub">{x.desc}</div></div>
-                    <b className="b">฿{x.price}</b>
-                  </label>
-                ))}
-              </div>
-              <div className="row">
-                <span>จำนวนที่นั่ง</span>
-                <div className="row b" style={{ gap: 14 }}>
-                  <button className="circ" aria-label="ลด" style={{ width: 36, height: 36 }} onClick={() => setSeats((s) => Math.max(1, s - 1))}>−</button>
-                  <span>{seats}</span>
-                  <button className="circ" aria-label="เพิ่ม" style={{ width: 36, height: 36 }} onClick={() => (seats < v.max ? setSeats(seats + 1) : say("ที่นั่งเต็มสำหรับรถประเภทนี้"))}>+</button>
-                </div>
-              </div>
-              <button className="card row" onClick={paySheet} style={{ textAlign: "left", color: "inherit", font: "inherit" }}>
-                <span>ชำระด้วย</span><b className="b">{PM[pm]} ›</b>
-              </button>
-            </div>
-            <div style={{ padding: "16px 20px 28px", borderTop: "1.5px solid var(--line)" }}>
-              <button className="cta" disabled={busy} onClick={confirm}>{busy ? "กำลังจอง…" : `ยืนยันการจอง · ฿${v.price * seats}`}</button>
-            </div>
-          </section>
-        )}
+function fmtSW(ms: number) {
+  const c = Math.floor(ms / 10) % 100;
+  const s = Math.floor(ms / 1000) % 60;
+  const m = Math.floor(ms / 60000);
+  return `${pad(m)}:${pad(s)}.${pad(c)}`;
+}
 
-        {/* 3 ติดตามรถ */}
-        {screen === "track" && booking && (
-          <section className="s">
-            <div className="map" style={{ height: 400 }}>
-              <MapSvg van />
-              <button className="circ" onClick={() => go("home")} aria-label="ย้อนกลับ" style={{ position: "absolute", left: 20, top: 48, zIndex: 2 }}>←</button>
-            </div>
-            <div className="sheet">
-              <div className="row"><b style={{ fontSize: 20 }} aria-live="polite">{status === "cancelled" ? "ยกเลิกแล้ว" : phase}</b><span className="b sub">#{booking.id}</span></div>
-              <div className="steps">
-                <div className="on">ยืนยัน</div><div className="on">รถกำลังมา</div>
-                <div className={t >= ETA ? "on" : ""}>กำลังเดินทาง</div><div className={t >= ETA + 3 ? "on" : ""}>ถึงที่หมาย</div>
-              </div>
-              <div className="card row">
-                <DriverSvg />
-                <div><b>{booking.driver.name} <span style={{ color: "#b45309" }}>{booking.driver.rating} ★</span></b><div className="sub">{booking.driver.car}</div></div>
-                <span className="b"><VehSvg i={vIdx(booking.vehicle)} w={84} /></span>
-              </div>
-              <div className="row">
-                <button className="gh" style={{ color: "var(--ok)", borderColor: "var(--ok)" }} onClick={() => setCall({ sec: 0, mute: false, spk: false })}>โทร</button>
-                <button className="gh" style={{ color: "#a855f7", borderColor: "#a855f7" }} onClick={() => setChat(true)}>แชท</button>
-                <button className="gh" style={{ color: "var(--or)", borderColor: "var(--or)" }} onClick={share}>แชร์เส้นทาง</button>
-              </div>
-              <button className="gh" style={{ flex: "none", marginTop: "auto", color: "var(--er)", borderColor: "var(--er)" }} onClick={cancel}>ยกเลิกการจอง</button>
-            </div>
-          </section>
-        )}
+function StopwatchTab({ beep }: { beep: (f?: number, d?: number) => void }) {
+  const [mode, setMode] = useState<"sw" | "cd">("sw");
+  // stopwatch
+  const [running, setRunning] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [laps, setLaps] = useState<number[]>([]);
+  const base = useRef(0);
+  useEffect(() => {
+    if (!running) return;
+    base.current = Date.now() - elapsed;
+    const t = setInterval(() => setElapsed(Date.now() - base.current), 33);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running]);
 
-        {/* 4 ถึงที่หมาย */}
-        {screen === "done" && booking && (
-          <section className="s">
-            <div style={{ textAlign: "center", padding: "64px 0 16px" }}>
-              <div style={{ width: 72, height: 72, borderRadius: "50%", background: "#16a34a", margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" aria-hidden><path d="M5 12l5 5 9-10" /></svg>
-              </div>
-              <div style={{ fontSize: 24, fontWeight: 700, marginTop: 8 }}>ถึงที่หมายแล้ว</div>
-              <div className="sub">ขอบคุณที่ใช้บริการ</div>
-            </div>
-            <div style={{ padding: "0 20px", display: "flex", flexDirection: "column", gap: 14, flex: 1 }}>
-              <div className="card" style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14 }}>
-                <div className="row">ค่าโดยสาร<b className="b">฿{booking.fare}</b></div>
-                <div className="row">รถ · ที่นั่ง<b className="b">{booking.vehicle} · {booking.seats} ที่นั่ง</b></div>
-                <div className="row">ชำระด้วย<b className="b">{PM[pm]}</b></div>
-              </div>
-              <b style={{ textAlign: "center", fontSize: 17 }}>ให้คะแนนการเดินทาง</b>
-              <div style={{ textAlign: "center" }}>
-                {[1, 2, 3, 4, 5].map((n) => <button key={n} className={`st${n <= rate ? " on" : ""}`} aria-label={`${n} ดาว`} onClick={() => setRate(n)}>★</button>)}
-              </div>
-              <textarea value={comment} onChange={(e) => setComment(e.target.value)} placeholder="เขียนความคิดเห็น (ไม่บังคับ)" aria-label="ความคิดเห็น"
-                style={{ height: 90, border: "1.5px solid var(--line)", borderRadius: 14, padding: 12, resize: "none" }} />
-            </div>
-            <div style={{ padding: "16px 20px 28px", display: "flex", flexDirection: "column", gap: 10 }}>
-              <button className="cta" onClick={finish}>เสร็จสิ้น</button>
-              <button className="gh" style={{ flex: "none" }} onClick={() => { const h = hist.find((x) => x.id === booking.id); if (h) receipt(h); }}>ดูใบเสร็จ</button>
-            </div>
-          </section>
-        )}
+  // countdown
+  const [cdMin, setCdMin] = useState(5);
+  const [cdLeft, setCdLeft] = useState(300);
+  const [cdRun, setCdRun] = useState(false);
+  const endAt = useRef(0);
+  useEffect(() => {
+    if (!cdRun) return;
+    endAt.current = Date.now() + cdLeft * 1000;
+    const t = setInterval(() => {
+      const left = Math.max(0, Math.ceil((endAt.current - Date.now()) / 1000));
+      setCdLeft(left);
+      if (left === 0) {
+        setCdRun(false);
+        [0, 300, 600].forEach((d) => setTimeout(() => beep(988, 0.25), d));
+      }
+    }, 200);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cdRun]);
 
-        {/* 5 การเดินทาง */}
-        {screen === "trips" && (
-          <section className="s">
-            <div className="h">การเดินทางของฉัน</div>
-            <div className="lst" style={{ paddingTop: 12 }}>
-              {hist.map((h) => (
-                <button key={h.id} className="card row" onClick={() => (h.st === "ongoing" ? go("track") : receipt(h))} style={{ textAlign: "left", color: "inherit", font: "inherit" }}>
-                  <VehSvg i={vIdx(h.v)} w={64} />
-                  <div><b>ไป{h.to}</b><div className="sub">{h.d} · {h.v} · ฿{h.fare}</div></div>
-                  <span className="b"><Chip st={h.st} /></span>
-                </button>
+  return (
+    <>
+      <div className="seg">
+        <button className={mode === "sw" ? "on" : ""} onClick={() => setMode("sw")}>จับเวลา</button>
+        <button className={mode === "cd" ? "on" : ""} onClick={() => setMode("cd")}>นับถอยหลัง</button>
+      </div>
+      {mode === "sw" ? (
+        <>
+          <div className={`digits ${prompt.className}`}>{fmtSW(elapsed)}</div>
+          <div className="btnrow">
+            <button className="btn ghost" onClick={() => { if (running) setLaps((l) => [elapsed, ...l]); else { setElapsed(0); setLaps([]); } }}>
+              {running ? "บันทึกรอบ" : "รีเซ็ต"}
+            </button>
+            <button className={`btn ${running ? "stop" : "go"}`} onClick={() => setRunning((r) => !r)}>{running ? "หยุด" : elapsed ? "เริ่มต่อ" : "เริ่ม"}</button>
+          </div>
+          <div className="list">
+            {laps.map((l, i) => (
+              <div className="lap" key={i}>
+                <span>รอบที่ {laps.length - i}</span>
+                <span>{fmtSW(l - (laps[i + 1] ?? 0))}</span>
+                <span className="muted">{fmtSW(l)}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className={`digits ${prompt.className}`}>{pad(Math.floor(cdLeft / 60))}:{pad(cdLeft % 60)}</div>
+          {!cdRun && (
+            <div className="chips center">
+              {[1, 3, 5, 10, 25].map((m) => (
+                <button key={m} className={`chip ${cdMin === m ? "on" : ""}`} onClick={() => { setCdMin(m); setCdLeft(m * 60); }}>{m} นาที</button>
               ))}
             </div>
-            <NavBar cur="trips" />
-          </section>
-        )}
+          )}
+          <div className="btnrow">
+            <button className="btn ghost" onClick={() => { setCdRun(false); setCdLeft(cdMin * 60); }}>รีเซ็ต</button>
+            <button className={`btn ${cdRun ? "stop" : "go"}`} onClick={() => { if (cdLeft === 0) setCdLeft(cdMin * 60); setCdRun((r) => !r); }}>{cdRun ? "หยุด" : "เริ่ม"}</button>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
 
-        {/* 6 ตั๋วของฉัน */}
-        {screen === "tix" && (
-          <section className="s">
-            <div className="h">ตั๋วของฉัน</div>
-            <div className="lst" style={{ paddingTop: 12 }}>
-              {ongoing ? (
-                <>
-                  <div className="card" style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-                    <VehSvg i={vIdx(booking.vehicle)} w={130} />
-                    <b>{booking.vehicle} · {booking.seats} ที่นั่ง</b>
-                    <div className="sub">{from} → {to}</div>
-                    <Qr id={booking.id} />
-                    <div className="sub">#{booking.id} · ฿{booking.fare}</div>
-                  </div>
-                  <button className="cta" onClick={() => go("track")}>ติดตามรถ</button>
-                  <button className="gh" style={{ flex: "none", color: "var(--er)", borderColor: "var(--er)" }} onClick={cancel}>ยกเลิกการจอง</button>
-                </>
-              ) : (
-                <div className="card" style={{ textAlign: "center", display: "flex", flexDirection: "column", gap: 12 }}>
-                  <b>ยังไม่มีตั๋วที่ใช้งานอยู่</b><span className="sub">จองรถเพื่อรับตั๋วของคุณ</span>
-                  <button className="cta" onClick={() => go("home")}>จองรถรับส่ง</button>
+/* ───────────── 4. นาฬิกาปลุก ───────────── */
+
+interface Alarm { id: string; time: string; label: string; on: boolean }
+
+function AlarmTab({ alarms, setAlarms, unlock, beep }: {
+  alarms: Alarm[]; setAlarms: (f: (a: Alarm[]) => Alarm[]) => void; unlock: () => void; beep: (f?: number, d?: number) => void;
+}) {
+  const [time, setTime] = useState("07:00");
+  const [label, setLabel] = useState("");
+  const sorted = [...alarms].sort((a, b) => a.time.localeCompare(b.time));
+  return (
+    <>
+      <div className="panel form">
+        <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className={`timein ${prompt.className}`} aria-label="เวลาปลุก" />
+        <input type="text" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="ชื่อ เช่น ตื่นไปทำงาน" aria-label="ชื่อการปลุก" />
+        <button className="btn go" onClick={() => {
+          unlock();
+          if (!time) return;
+          setAlarms((a) => [...a, { id: crypto.randomUUID(), time, label: label.trim() || "นาฬิกาปลุก", on: true }]);
+          setLabel("");
+        }}>เพิ่มการปลุก</button>
+        <button className="btn ghost" onClick={() => { unlock(); beep(); }}>ทดสอบเสียง</button>
+      </div>
+      {sorted.length === 0 && <div className="panel muted">ยังไม่มีการปลุก ตั้งเวลาแล้วกดเพิ่ม</div>}
+      <div className="list">
+        {sorted.map((a) => (
+          <div className={`alarm ${a.on ? "" : "off"}`} key={a.id}>
+            <div>
+              <div className={`at ${prompt.className}`}>{a.time}</div>
+              <div className="muted">{a.label} · ทุกวัน</div>
+            </div>
+            <div className="alarm-actions">
+              <button className={`switch ${a.on ? "on" : ""}`} role="switch" aria-checked={a.on} aria-label="เปิด/ปิด" onClick={() => setAlarms((l) => l.map((x) => (x.id === a.id ? { ...x, on: !x.on } : x)))} />
+              <button className="link" onClick={() => setAlarms((l) => l.filter((x) => x.id !== a.id))}>ลบ</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="note">เสียงปลุกจะดังเมื่อเปิดหน้านี้ค้างไว้ในเบราว์เซอร์เท่านั้น</p>
+    </>
+  );
+}
+
+/* ───────────── 5. ปฏิทิน ───────────── */
+
+function CalendarTab({ now }: { now: Date | null }) {
+  const today = now ?? new Date();
+  const [ym, setYm] = useState<{ y: number; m: number } | null>(null);
+  const [sel, setSel] = useState<string | null>(null);
+  const [notes, setNotes] = useStored<Record<string, string>>("clock.notes", {});
+  const cur = ym ?? { y: today.getFullYear(), m: today.getMonth() };
+  const first = new Date(cur.y, cur.m, 1).getDay();
+  const days = new Date(cur.y, cur.m + 1, 0).getDate();
+  const key = (d: number) => `${cur.y}-${pad(cur.m + 1)}-${pad(d)}`;
+  const todayKey = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const go = (delta: number) => {
+    const d = new Date(cur.y, cur.m + delta, 1);
+    setYm({ y: d.getFullYear(), m: d.getMonth() });
+  };
+  const cells: (number | null)[] = [...Array(first).fill(null), ...Array.from({ length: days }, (_, i) => i + 1)];
+  return (
+    <>
+      <div className="calhead">
+        <button className="btn ghost sm" onClick={() => go(-1)} aria-label="เดือนก่อน">‹</button>
+        <h2 className={prompt.className}>{MONTHS[cur.m]} {cur.y + 543}</h2>
+        <button className="btn ghost sm" onClick={() => go(1)} aria-label="เดือนถัดไป">›</button>
+      </div>
+      <div className="cal">
+        {WEEKDAYS.map((w, i) => <div key={w} className={`wd ${i === 0 ? "sun" : ""}`}>{w}</div>)}
+        {cells.map((d, i) =>
+          d === null ? <div key={i} /> : (
+            <button key={i} className={`day ${key(d) === todayKey ? "today" : ""} ${sel === key(d) ? "sel" : ""} ${(first + d - 1) % 7 === 0 ? "sun" : ""}`} onClick={() => setSel(key(d))}>
+              {d}
+              {notes[key(d)] && <i className="dot" />}
+            </button>
+          )
+        )}
+      </div>
+      {sel ? (
+        <div className="panel">
+          <b>{Number(sel.slice(8))} {MONTHS[Number(sel.slice(5, 7)) - 1]} {Number(sel.slice(0, 4)) + 543}</b>
+          <textarea value={notes[sel] ?? ""} placeholder="จดบันทึกหรือนัดหมายของวันนี้" rows={3}
+            onChange={(e) => { const v = e.target.value; setNotes((n) => { const c = { ...n }; if (v) c[sel] = v; else delete c[sel]; return c; }); }} />
+        </div>
+      ) : <p className="note">แตะวันที่เพื่อจดบันทึก</p>}
+      <button className="link" onClick={() => { setYm(null); setSel(todayKey); }}>กลับไปวันนี้</button>
+    </>
+  );
+}
+
+/* ───────────── 6. สภาพอากาศ ───────────── */
+
+const PLACES = [
+  { name: "สุโขทัย", lat: 17.0056, lon: 99.8264 },
+  { name: "กรุงเทพฯ", lat: 13.7563, lon: 100.5018 },
+  { name: "เชียงใหม่", lat: 18.7883, lon: 98.9853 },
+  { name: "ภูเก็ต", lat: 7.8804, lon: 98.3923 },
+];
+
+interface Wx {
+  current: { temperature_2m: number; relative_humidity_2m: number; apparent_temperature: number; weather_code: number; wind_speed_10m: number };
+  daily: { time: string[]; weather_code: number[]; temperature_2m_max: number[]; temperature_2m_min: number[]; precipitation_probability_max: number[] };
+}
+
+function wmo(c: number): [string, string] {
+  if (c === 0) return ["☀️", "ท้องฟ้าแจ่มใส"];
+  if (c <= 2) return ["🌤️", "มีเมฆบางส่วน"];
+  if (c === 3) return ["☁️", "เมฆมาก"];
+  if (c <= 48) return ["🌫️", "หมอก"];
+  if (c <= 57) return ["🌦️", "ฝนปรอย"];
+  if (c <= 67) return ["🌧️", "ฝนตก"];
+  if (c <= 77) return ["❄️", "หิมะ"];
+  if (c <= 82) return ["🌧️", "ฝนซู่"];
+  return ["⛈️", "พายุฝนฟ้าคะนอง"];
+}
+
+function WeatherTab() {
+  const [place, setPlace] = useState(PLACES[0]);
+  const [wx, setWx] = useState<Wx | null>(null);
+  const [err, setErr] = useState(false);
+
+  useEffect(() => {
+    let dead = false;
+    setWx(null);
+    setErr(false);
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${place.lat}&longitude=${place.lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto`;
+    fetch(url).then((r) => r.json()).then((j: Wx) => { if (!dead) setWx(j); }).catch(() => { if (!dead) setErr(true); });
+    return () => { dead = true; };
+  }, [place]);
+
+  const locate = () => {
+    navigator.geolocation?.getCurrentPosition(
+      (p) => setPlace({ name: "ตำแหน่งของฉัน", lat: p.coords.latitude, lon: p.coords.longitude }),
+      () => setErr(true)
+    );
+  };
+
+  return (
+    <>
+      <div className="chips">
+        {PLACES.map((p) => <button key={p.name} className={`chip ${place.name === p.name ? "on" : ""}`} onClick={() => setPlace(p)}>{p.name}</button>)}
+        <button className={`chip ${place.name === "ตำแหน่งของฉัน" ? "on" : ""}`} onClick={locate}>ตำแหน่งของฉัน</button>
+      </div>
+      {err && <div className="panel">โหลดสภาพอากาศไม่ได้ ลองใหม่อีกครั้ง</div>}
+      {!wx && !err && <div className="panel">กำลังโหลด…</div>}
+      {wx && (
+        <>
+          <section className="panel wnow">
+            <div className="wicon">{wmo(wx.current.weather_code)[0]}</div>
+            <div>
+              <div className={`wtemp ${prompt.className}`}>{Math.round(wx.current.temperature_2m)}°</div>
+              <div>{wmo(wx.current.weather_code)[1]} · {place.name}</div>
+              <div className="muted">รู้สึกเหมือน {Math.round(wx.current.apparent_temperature)}° · ความชื้น {wx.current.relative_humidity_2m}% · ลม {Math.round(wx.current.wind_speed_10m)} กม./ชม.</div>
+            </div>
+          </section>
+          <h2>พยากรณ์ 7 วัน</h2>
+          <div className="list">
+            {wx.daily.time.map((d, i) => {
+              const dt = new Date(d + "T12:00:00");
+              return (
+                <div className="fday" key={d}>
+                  <span>{i === 0 ? "วันนี้" : new Intl.DateTimeFormat("th-TH", { weekday: "short", day: "numeric", month: "short" }).format(dt)}</span>
+                  <span>{wmo(wx.daily.weather_code[i])[0]}</span>
+                  <span className="muted">ฝน {wx.daily.precipitation_probability_max[i] ?? 0}%</span>
+                  <span><b>{Math.round(wx.daily.temperature_2m_max[i])}°</b> <span className="muted">{Math.round(wx.daily.temperature_2m_min[i])}°</span></span>
                 </div>
-              )}
-            </div>
-            <NavBar cur="tix" />
-          </section>
-        )}
-
-        {/* 7 โปรไฟล์ */}
-        {screen === "prof" && (
-          <section className="s">
-            <div className="h">โปรไฟล์</div>
-            <div className="lst" style={{ paddingTop: 12 }}>
-              <div className="row" style={{ padding: "4px 0" }}>
-                <svg width="64" height="64" viewBox="0 0 96 96" style={{ borderRadius: "50%" }} aria-hidden>
-                  <rect width="96" height="96" fill="#bfdbfe" /><circle cx="48" cy="38" r="16" fill="#1d4ed8" /><path d="M12 96c3-22 20-30 36-30s33 8 36 30z" fill="#1d4ed8" />
-                </svg>
-                <div><b style={{ fontSize: 18 }}>ผู้ใช้ตัวอย่าง</b><div className="sub">081-234-5678</div></div>
-              </div>
-              <button className="card row" onClick={paySheet} style={{ textAlign: "left", color: "inherit", font: "inherit" }}>ช่องทางชำระเงิน<span className="b">{PM[pm]} ›</span></button>
-              <div className="card row">โหมดมืด<span className="b"><Switch on={dark} label="โหมดมืด" onClick={() => setDark(!dark)} /></span></div>
-              <div className="card row">การแจ้งเตือน<span className="b"><Switch on={noti} label="การแจ้งเตือน" onClick={() => setNoti(!noti)} /></span></div>
-              <button className="card row" onClick={helpSheet} style={{ textAlign: "left", color: "inherit", font: "inherit" }}>ศูนย์ช่วยเหลือ<span className="b">›</span></button>
-              <button className="gh" style={{ flex: "none", color: "var(--er)", borderColor: "var(--er)" }} onClick={logout}>ออกจากระบบ</button>
-            </div>
-            <NavBar cur="prof" />
-          </section>
-        )}
-
-        {/* Bottom sheet */}
-        {sheet && (
-          <div className="ov on" onClick={(e) => e.target === e.currentTarget && close()}>
-            <div className="sheetm" role="dialog" aria-label={sheet.title}>
-              <b style={{ fontSize: 18 }}>{sheet.title}</b>
-              {sheet.items.map((it, i) =>
-                it.k === "node" ? <div key={i}>{it.node}</div>
-                : it.k === "btn" ? <button key={i} className={it.cls ?? "gh"} style={{ flex: "none" }} onClick={it.fn}>{it.b}</button>
-                : <button key={i} className="rec" onClick={it.fn}>
-                    <span className="ic" style={{ background: it.c ?? "#bfdbfe" }}>{it.i}</span>
-                    <span>{it.t}<br /><span className="sub">{it.s}</span></span>
-                  </button>
-              )}
-            </div>
+              );
+            })}
           </div>
-        )}
+        </>
+      )}
+    </>
+  );
+}
 
-        {/* แชท */}
-        {chat && (
-          <div className="ov on full">
-            <div className="h" style={{ paddingTop: 20 }}><button className="circ" onClick={() => setChat(false)} aria-label="ปิดแชท">←</button>แชทกับ{booking?.driver.name ?? "คนขับ"}</div>
-            <div className="msgs" ref={msgBox}>
-              {msgs.map((m, i) => <div key={i} className={`msg${m.me ? " me" : ""}`}>{m.m}</div>)}
-            </div>
-            <div style={{ display: "flex", gap: 6, padding: "0 16px 8px", overflowX: "auto" }}>
-              {["ฉันรออยู่หน้าบ้าน", "เปลี่ยนจุดรับได้ไหม", "ขอบคุณครับ"].map((q) => <button key={q} className="chip" onClick={() => send(q)}>{q}</button>)}
-            </div>
-            <div className="row" style={{ padding: "8px 16px 24px" }}>
-              <input className="in" value={cin} onChange={(e) => setCin(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder="พิมพ์ข้อความ…" aria-label="ข้อความ"
-                style={{ flex: 1, height: 44, border: "1.5px solid var(--line)", borderRadius: 22, padding: "0 16px", font: "inherit" }} />
-              <button className="circ" onClick={() => send()} aria-label="ส่ง">➤</button>
-            </div>
-          </div>
-        )}
+/* ───────────── 7. กราฟหุ้น ───────────── */
 
-        {/* โทร */}
-        {call && (
-          <div className="ov on full call">
-            <DriverSvg size={96} />
-            <div style={{ fontSize: 22, fontWeight: 700 }}>{booking?.driver.name ?? "คนขับ"}</div>
-            <div>{call.sec < 2 ? "กำลังโทร…" : mm(call.sec - 2)}</div>
-            <div className="row" style={{ gap: 16, marginTop: 24 }}>
-              <button aria-pressed={call.mute} onClick={() => setCall({ ...call, mute: !call.mute })}>ปิดเสียง</button>
-              <button aria-pressed={call.spk} onClick={() => setCall({ ...call, spk: !call.spk })}>ลำโพง</button>
-              <button className="end" onClick={() => setCall(null)}>วางสาย</button>
-            </div>
-          </div>
-        )}
+const STOCKS = [
+  { s: "SET", base: 1420 },
+  { s: "PTT", base: 33 },
+  { s: "AOT", base: 58 },
+  { s: "CPALL", base: 56 },
+  { s: "ADVANC", base: 290 },
+];
+const N = 60;
 
-        {toast && <div className="toast" role="status">{toast}</div>}
+function StocksTab() {
+  const [series, setSeries] = useState<Record<string, number[]>>({});
+  const [sym, setSym] = useState("SET");
+
+  useEffect(() => {
+    const init: Record<string, number[]> = {};
+    STOCKS.forEach(({ s, base }) => {
+      let v = base;
+      init[s] = Array.from({ length: N }, () => (v = Math.max(1, v * (1 + (Math.random() - 0.5) * 0.012))));
+    });
+    setSeries(init);
+    const t = setInterval(() => {
+      setSeries((prev) => {
+        const next: Record<string, number[]> = {};
+        for (const k of Object.keys(prev)) {
+          const arr = prev[k];
+          const last = arr[arr.length - 1];
+          next[k] = [...arr.slice(1), Math.max(1, last * (1 + (Math.random() - 0.5) * 0.012))];
+        }
+        return next;
+      });
+    }, 2000);
+    return () => clearInterval(t);
+  }, []);
+
+  const data = series[sym];
+  if (!data) return <div className="panel">กำลังโหลด…</div>;
+  const W = 640, H = 260, P = 8;
+  const min = Math.min(...data), max = Math.max(...data);
+  const x = (i: number) => P + (i / (N - 1)) * (W - 2 * P);
+  const y = (v: number) => H - P - ((v - min) / (max - min || 1)) * (H - 2 * P);
+  const line = data.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const chg = data[N - 1] - data[0];
+  const pct = (chg / data[0]) * 100;
+  const up = chg >= 0;
+  const col = up ? "var(--up)" : "var(--down)";
+  const dp = data[N - 1] < 100 ? 2 : 1;
+
+  return (
+    <>
+      <div className="chips">
+        {STOCKS.map(({ s }) => <button key={s} className={`chip ${sym === s ? "on" : ""}`} onClick={() => setSym(s)}>{s}</button>)}
+      </div>
+      <div className="panel">
+        <div className="price">
+          <span className={`wtemp ${prompt.className}`}>{data[N - 1].toFixed(dp)}</span>
+          <b style={{ color: col }}>{up ? "▲" : "▼"} {Math.abs(chg).toFixed(dp)} ({pct.toFixed(2)}%)</b>
+        </div>
+        <svg viewBox={`0 0 ${W} ${H}`} className="chart" role="img" aria-label={`กราฟราคา ${sym}`}>
+          <defs>
+            <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stopColor={col} stopOpacity="0.25" />
+              <stop offset="1" stopColor={col} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          {[0.25, 0.5, 0.75].map((f) => <line key={f} x1={0} x2={W} y1={H * f} y2={H * f} className="grid" />)}
+          <path d={`${line} L${x(N - 1)},${H} L${x(0)},${H} Z`} fill="url(#fill)" />
+          <path d={line} fill="none" stroke={col} strokeWidth="2.5" strokeLinejoin="round" />
+          <circle cx={x(N - 1)} cy={y(data[N - 1])} r="4.5" fill={col} />
+        </svg>
+        <div className="muted between"><span>ต่ำสุด {min.toFixed(dp)}</span><span>สูงสุด {max.toFixed(dp)}</span></div>
+      </div>
+      <p className="note">ข้อมูลนี้เป็นข้อมูลจำลองเพื่อสาธิต ไม่ใช่ราคาจริง ต้องการราคาจริงให้ดึงจาก API ตลาดหลักทรัพย์ผ่าน API route ของคุณเอง</p>
+    </>
+  );
+}
+
+/* ───────────── หน้าหลัก ───────────── */
+
+const TABS = [
+  { id: "time", label: "เวลา", icon: "🕒" },
+  { id: "football", label: "ผลบอล", icon: "⚽" },
+  { id: "stopwatch", label: "จับเวลา", icon: "⏱️" },
+  { id: "alarm", label: "ปลุก", icon: "⏰" },
+  { id: "calendar", label: "ปฏิทิน", icon: "📅" },
+  { id: "weather", label: "อากาศ", icon: "🌤️" },
+  { id: "stocks", label: "หุ้น", icon: "📈" },
+] as const;
+type TabId = (typeof TABS)[number]["id"];
+
+export default function Home() {
+  const [tab, setTab] = useState<TabId>("time");
+  const now = useNow();
+  const { unlock, beep } = useBeeper();
+  const [alarms, setAlarms] = useStored<Alarm[]>("clock.alarms", []);
+  const [ringing, setRinging] = useState<Alarm | null>(null);
+  const lastMin = useRef("");
+
+  useEffect(() => {
+    window.addEventListener("pointerdown", unlock, { once: true });
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, [unlock]);
+
+  useEffect(() => {
+    if (!now) return;
+    const hhmm = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const k = `${now.toDateString()} ${hhmm}`;
+    if (lastMin.current === k) return;
+    lastMin.current = k;
+    const hit = alarms.find((a) => a.on && a.time === hhmm);
+    if (hit) setRinging(hit);
+  }, [now, alarms]);
+
+  useEffect(() => {
+    if (!ringing) return;
+    const ring = () => { beep(880, 0.2); setTimeout(() => beep(1175, 0.2), 250); };
+    ring();
+    const t = setInterval(ring, 900);
+    return () => clearInterval(t);
+  }, [ringing, beep]);
+
+  return (
+    <div className={`app ${sarabun.className}`}>
+      <style>{CSS}</style>
+      <nav className="nav" aria-label="เมนูหลัก">
+        <div className={`brand ${prompt.className}`}>นาฬิกา</div>
+        {TABS.map((t) => (
+          <button key={t.id} className={`tab ${tab === t.id ? "on" : ""}`} onClick={() => setTab(t.id)} aria-current={tab === t.id}>
+            <span aria-hidden>{t.icon}</span>
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </nav>
+      <main className="main">
+        <h1 className={prompt.className}>{TABS.find((t) => t.id === tab)?.label}</h1>
+        {tab === "time" && <TimeTab now={now} />}
+        {tab === "football" && <FootballTab />}
+        {tab === "stopwatch" && <StopwatchTab beep={beep} />}
+        {tab === "alarm" && <AlarmTab alarms={alarms} setAlarms={setAlarms} unlock={unlock} beep={beep} />}
+        {tab === "calendar" && <CalendarTab now={now} />}
+        {tab === "weather" && <WeatherTab />}
+        {tab === "stocks" && <StocksTab />}
       </main>
+      {ringing && (
+        <div className="overlay" role="alertdialog" aria-label="นาฬิกาปลุก">
+          <div className="ringbox">
+            <div className={`big ${prompt.className}`}>{ringing.time}</div>
+            <p>{ringing.label}</p>
+            <button className="btn stop" onClick={() => setRinging(null)}>ปิดเสียง</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+/* ───────────── สไตล์ ───────────── */
+
+const CSS = `
+:root{--bg:#e9ede8;--panel:#f7f8f5;--ink:#17231f;--muted:#5b6b64;--line:#cbd3cc;--teal:#0e6b5c;--amber:#e0a030;--red:#c23b4e;--up:#1b8a4b;--down:#c23b4e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink)}
+.app{min-height:100dvh;display:grid;grid-template-columns:200px 1fr}
+.nav{position:sticky;top:0;height:100dvh;padding:24px 14px;display:flex;flex-direction:column;gap:4px;border-right:1px solid var(--line)}
+.brand{font-size:22px;font-weight:700;padding:0 12px 18px;color:var(--teal)}
+.tab{display:flex;gap:10px;align-items:center;padding:10px 12px;border:0;background:none;border-radius:10px;font:inherit;font-size:16px;color:var(--muted);cursor:pointer;text-align:left}
+.tab:hover{background:#dfe6df}
+.tab.on{background:var(--ink);color:#fff}
+.tab:focus-visible,.btn:focus-visible,.chip:focus-visible,.day:focus-visible,.switch:focus-visible{outline:3px solid var(--amber);outline-offset:2px}
+.main{max-width:720px;width:100%;padding:28px 24px 60px}
+h1{font-size:28px;margin:0 0 18px;font-weight:600}
+h2{font-size:18px;margin:26px 0 10px;font-weight:600}
+.muted{color:var(--muted)}
+.note{color:var(--muted);font-size:14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin:10px 0}
+.list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.between{display:flex;justify-content:space-between;font-size:14px;margin-top:6px}
+.center{justify-content:center}
+
+.hero{position:relative;width:min(300px,80vw);aspect-ratio:1;margin:8px auto 0}
+.ring{width:100%;height:100%}
+.ring-bg{fill:none;stroke:var(--line);stroke-width:8}
+.ring-fg{fill:none;stroke:var(--teal);stroke-width:8;stroke-linecap:round}
+.hero-text{position:absolute;inset:0;display:grid;place-content:center;text-align:center}
+.big{font-size:64px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1}
+.sec{color:var(--muted);margin-top:8px}
+.date{text-align:center;font-size:18px;margin:14px 0 0}
+.zones{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.zone{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center}
+.zone div:first-child{display:flex;flex-direction:column}
+.zt{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums}
+
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.chip{border:1px solid var(--line);background:var(--panel);padding:7px 14px;border-radius:99px;font:inherit;cursor:pointer;color:var(--ink)}
+.chip.on{background:var(--teal);border-color:var(--teal);color:#fff}
+.match{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.team{display:flex;align-items:center;gap:8px;font-weight:500}
+.team.right{justify-content:flex-end;text-align:right}
+.logo-ph{width:28px;height:28px;border-radius:50%;background:var(--line);flex:none}
+.score{text-align:center;display:flex;flex-direction:column;min-width:76px}
+.score span{font-size:22px;font-weight:600}
+.live{color:var(--red);font-weight:700}
+
+.seg{display:inline-flex;background:#dfe6df;border-radius:10px;padding:3px;margin-bottom:8px}
+.seg button{border:0;background:none;padding:8px 18px;border-radius:8px;font:inherit;cursor:pointer;color:var(--muted)}
+.seg button.on{background:var(--panel);color:var(--ink);font-weight:700}
+.digits{font-size:clamp(48px,14vw,92px);font-weight:600;text-align:center;font-variant-numeric:tabular-nums;margin:18px 0}
+.btnrow{display:flex;gap:14px;justify-content:center;margin-bottom:18px}
+.btn{border:0;border-radius:99px;padding:12px 26px;font:inherit;font-weight:700;cursor:pointer;color:#fff}
+.btn.go{background:var(--teal)}
+.btn.stop{background:var(--red)}
+.btn.ghost{background:#dfe6df;color:var(--ink)}
+.btn.sm{padding:6px 16px;font-size:20px}
+.lap{display:grid;grid-template-columns:1fr auto auto;gap:18px;padding:10px 14px;background:var(--panel);border-radius:10px;font-variant-numeric:tabular-nums}
+
+.form{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+input[type=text],input[type=time],textarea{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink)}
+input[type=text]{flex:1;min-width:160px}
+.timein{font-size:24px;font-weight:600}
+textarea{width:100%;margin-top:8px;resize:vertical}
+.alarm{display:flex;justify-content:space-between;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
+.alarm.off{opacity:.55}
+.at{font-size:32px;font-weight:600;font-variant-numeric:tabular-nums}
+.alarm-actions{display:flex;gap:14px;align-items:center}
+.switch{width:46px;height:26px;border-radius:99px;border:0;background:var(--line);position:relative;cursor:pointer}
+.switch::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform .15s}
+.switch.on{background:var(--teal)}
+.switch.on::after{transform:translateX(20px)}
+.link{background:none;border:0;color:var(--teal);font:inherit;cursor:pointer;text-decoration:underline;padding:4px 0}
+
+.calhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.calhead h2{margin:0;font-size:22px}
+.cal{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.wd{text-align:center;color:var(--muted);padding:6px 0;font-size:14px}
+.sun{color:var(--red)}
+.day{position:relative;aspect-ratio:1;border:1px solid transparent;border-radius:10px;background:var(--panel);font:inherit;font-size:17px;cursor:pointer}
+.day.today{background:var(--teal);color:#fff}
+.day.sel{border-color:var(--ink)}
+.dot{position:absolute;bottom:6px;left:50%;width:6px;height:6px;margin-left:-3px;border-radius:50%;background:var(--amber)}
+
+.wnow{display:flex;gap:18px;align-items:center}
+.wicon{font-size:64px}
+.wtemp{font-size:52px;font-weight:600;line-height:1}
+.fday{display:grid;grid-template-columns:1.3fr auto 1fr auto;gap:14px;align-items:center;padding:10px 14px;background:var(--panel);border-radius:10px}
+.price{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.chart{width:100%;height:auto;margin-top:10px}
+.grid{stroke:var(--line);stroke-dasharray:4 5}
+
+.overlay{position:fixed;inset:0;background:rgba(23,35,31,.88);display:grid;place-items:center;z-index:50}
+.ringbox{background:var(--panel);border-radius:20px;padding:36px 44px;text-align:center}
+.ringbox p{font-size:20px;margin:14px 0 22px}
+@media (prefers-reduced-motion:no-preference){.ringbox{animation:pulse 1s ease-in-out infinite}}
+@keyframes pulse{50%{transform:scale(1.04)}}
+
+@media (max-width:720px){
+  .app{grid-template-columns:1fr;padding-bottom:70px}
+  .nav{position:fixed;inset:auto 0 0 0;height:auto;flex-direction:row;padding:6px;background:var(--panel);border-right:0;border-top:1px solid var(--line);z-index:20;justify-content:space-around}
+  .brand{display:none}
+  .tab{flex-direction:column;gap:2px;font-size:11px;padding:6px 4px;flex:1;align-items:center;text-align:center}
+  .main{padding:20px 16px}
+  .big{font-size:52px}
+}
+`;
